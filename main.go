@@ -20,7 +20,6 @@ const (
 	ProcessName = "IQ Option.exe"
 	BufferSize  = 50
 	MinSize     = 2000000
-	Cache       = 294144448
 	Name1       = "{\"name\":\"positions-state\","
 	Name2       = "{\"name\":\"heartbeat\",\"msg\":"
 	Name3       = "{\"name\":\"candle-generated\",\"microserviceName\":"
@@ -39,15 +38,6 @@ func main() {
 	pid := uint32(process.Pid())
 
 	address := searchMemoryAddress(pid)
-	processHandle, _ := getProcessHandle(pid)
-
-	readLen, err := kernel32.ReadProcessMemory(processHandle, win32.LPCVOID(Cache), arrByte)
-	if err != nil {
-		fmt.Printf("Error: %v\n", err)
-		return
-	}
-
-	fmt.Println(readLen)
 
 	s := string(arrByte)
 
