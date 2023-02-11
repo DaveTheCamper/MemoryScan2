@@ -6,10 +6,12 @@ import (
 	kernel32 "github.com/0xrawsec/golang-win32/win32/kernel32"
 	ps "github.com/mitchellh/go-ps"
 	windows "golang.org/x/sys/windows"
+	"io/ioutil"
 	"log"
 	"math"
 	"os"
 	"path"
+	"strconv"
 	"sync"
 	"time"
 )
@@ -26,6 +28,8 @@ const (
 	Name4       = "{\"name\":\"traders-mood-changed\","
 )
 
+var ArrNames = [4]string{Name1, Name2, Name3, Name4}
+
 func main() {
 
 	initialTime := time.Now().UnixMilli()
@@ -36,6 +40,10 @@ func main() {
 	fmt.Println(process)
 
 	pid := uint32(process.Pid())
+
+	if validateCache(pid) {
+		return
+	}
 
 	address := searchMemoryAddress(pid)
 
@@ -67,6 +75,37 @@ func saveCache(endereco int64) {
 	if err != nil {
 		log.Fatal(err)
 	}
+}
+
+func validateCache(pid uint32) bool {
+	buf, err := ioutil.ReadFile("cache.txt")
+
+	if err != nil {
+		return false
+	}
+
+	content := string(buf)
+	num, err := strconv.ParseInt(content, 10, 64)
+
+	if err != nil {
+		return false
+	}
+
+	win32handle, _ := getProcessHandle(pid)
+
+	for i := 0; i < 5; i++ {
+		time.Sleep(150 * time.Millisecond)
+
+		readNewWord := make([]byte, 200)
+		_, _ = kernel32.ReadProcessMemory(win32handle, win32.LPCVOID(num), readNewWord)
+		novaPalavra := string(readNewWord)
+
+		if getMatchesWord(novaPalavra) == "null" {
+			return false
+		}
+	}
+
+	return true
 }
 
 func getProcessBaseAddress(win32handle win32.HANDLE) int64 {
@@ -127,17 +166,25 @@ func searchMemoryAddress(pid uint32) AddressFound {
 
 	wg.Wait()
 
-	if len(foundResults.List) > 0 {
+	return foundAddressInList(&foundResults, win32handle)
+}
+
+func foundAddressInList(list *SafeList, win32handle win32.HANDLE) AddressFound {
+	foundResults := make([]AddressFound, len(list.List))
+
+	copy(foundResults, list.List)
+
+	if len(foundResults) > 0 {
 		for {
 			time.Sleep(1500 * time.Millisecond)
-			totalReady := len(foundResults.List)
 			var lastAddress AddressFound
 
-			fmt.Printf("Total ready before: %v\n", totalReady)
+			fmt.Printf("Total ready before: %v\n", len(foundResults))
 
-			for _, address := range foundResults.List {
+			for i := len(foundResults) - 1; i >= 0; i-- {
+				address := &foundResults[i]
+
 				if address.Declined {
-					totalReady--
 					continue
 				}
 
@@ -145,41 +192,58 @@ func searchMemoryAddress(pid uint32) AddressFound {
 				_, _ = kernel32.ReadProcessMemory(win32handle, win32.LPCVOID(address.Endereco), readNewWord)
 				novaPalavra := string(readNewWord)
 
-				if address.Endereco == 294144448 {
-					fmt.Printf(novaPalavra)
-				}
-
 				if novaPalavra == address.PalavraLog {
-					address.Declined = true
-					totalReady--
+					foundResults = remove(foundResults, i)
 					continue
 				} else if !verifyPalavra(Name1, novaPalavra) && !verifyPalavra(Name2, novaPalavra) && !verifyPalavra(Name3, novaPalavra) && !verifyPalavra(Name4, novaPalavra) {
-					address.Declined = true
-					totalReady--
+					foundResults = remove(foundResults, i)
 					continue
+				}
+
+				matches := getMatchesWord(novaPalavra)
+				if address.LastInfo == matches {
+					address.LastCounter++
+					if address.LastCounter >= 4 {
+						foundResults = remove(foundResults, i)
+						continue
+					}
+				} else {
+					address.LastInfo = matches
+					address.LastCounter = 1
 				}
 
 				address.PalavraLog = novaPalavra
-				lastAddress = address
+				lastAddress = *address
 			}
 
-			fmt.Printf("Total ready: %v\n", totalReady)
+			fmt.Printf("Total ready: %v\n", len(foundResults))
 
-			if totalReady == 1 {
-				return lastAddress
-			} else if totalReady == 0 {
-				for _, address := range foundResults.List {
-					address.Declined = false
+			if len(foundResults) < 10 {
+				for _, element := range foundResults {
+					if !element.Declined {
+						fmt.Printf("Cache -> %v %v %v\n", element.Declined, len(foundResults), element.LastInfo)
+					}
 				}
+			}
+
+			if len(foundResults) == 1 {
+				return lastAddress
+			} else if len(foundResults) == 0 {
+				foundResults := make([]AddressFound, len(list.List))
+				copy(foundResults, list.List)
 			}
 		}
 	}
 
-	fmt.Printf("Running rotines -> %v %v\n", int64(runningGoRoutines), len(foundResults.List))
-
 	return AddressFound{
 		Endereco: -1,
 	}
+}
+
+func remove(s []AddressFound, index int) []AddressFound {
+	ret := make([]AddressFound, 0)
+	ret = append(ret, s[:index]...)
+	return append(ret, s[index+1:]...)
 }
 
 func createGoRoutine(pid uint32, moduleList ModuleList, foundResults *SafeList) int64 {
@@ -201,9 +265,11 @@ type SafeList struct {
 }
 
 type AddressFound struct {
-	Declined   bool
-	Endereco   int64
-	PalavraLog string
+	Declined    bool
+	Endereco    int64
+	PalavraLog  string
+	LastInfo    string
+	LastCounter int64
 }
 
 func findWord(pid uint32, routineId int64, totalRoutines int64, moduleList ModuleList, foundResults *SafeList) {
@@ -260,6 +326,15 @@ func findWord(pid uint32, routineId int64, totalRoutines int64, moduleList Modul
 	}
 
 	defer wg.Done()
+}
+
+func getMatchesWord(palavra string) string {
+	for _, element := range ArrNames {
+		if verifyPalavra(element, palavra) {
+			return element
+		}
+	}
+	return "null"
 }
 
 func verifyPalavra(palavra string, inMemory string) bool {
